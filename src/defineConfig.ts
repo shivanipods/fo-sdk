@@ -72,10 +72,11 @@ export function defineConfig(input: DefineConfigInput): FoConfig {
 
   // Validate custom tools have required fields
   for (const registration of tools.custom ?? []) {
-    if (!registration.tool._brand || registration.tool._brand !== 'FoTool') {
+    const brand = registration.tool._brand as string
+    if (brand !== 'FoTool' && brand !== 'FoAction') {
       throw new Error(
-        'Each custom tool must be created with defineTool(). ' +
-        'Check your tools are proper FoTool instances.'
+        'Each custom tool must be created with defineTool() or defineAction(). ' +
+        'Check your tools are proper instances.'
       )
     }
 

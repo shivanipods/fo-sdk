@@ -2,7 +2,7 @@ import { Command } from 'commander'
 import chalk from 'chalk'
 import ora from 'ora'
 import { createServer } from 'http'
-import { findConfigFile, loadConfig } from '../utils/config.js'
+import { findConfigFile, loadConfig, normalizeConfig } from '../utils/config.js'
 import { getStoredCredentials, FO_API_BASE } from '../utils/auth.js'
 import fetch from 'node-fetch'
 
@@ -27,9 +27,10 @@ async function devAction(opts: { port: string; email?: string }) {
   }
 
   const spinner = ora('Loading config...').start()
-  let config: Awaited<ReturnType<typeof loadConfig>>
+  let norm: ReturnType<typeof normalizeConfig>
   try {
-    config = await loadConfig(configPath)
+    const config = await loadConfig(configPath)
+    norm = normalizeConfig(config)
     spinner.stop()
   } catch (err) {
     spinner.fail('Failed to load config')
@@ -37,19 +38,20 @@ async function devAction(opts: { port: string; email?: string }) {
     process.exit(1)
   }
 
-  const agentEmail = opts.email ?? `${config.agent.email}-dev@foibleai.com`
-  const customTools = config.tools?.custom ?? []
+  const agentEmail = opts.email ?? `${norm.agentEmail}-dev@foibleai.com`
+  const customItems = norm.customItems
 
-  // Start local webhook server for custom tools
-  if (customTools.length > 0) {
+  // Start local webhook server for custom actions
+  if (customItems.length > 0) {
     console.log(chalk.dim(`Starting local webhook server on port ${port}...`))
 
     const server = createServer(async (req, res) => {
-      // Match tool routes: POST /<toolname>
-      const toolName = req.url?.slice(1)
-      const reg = customTools.find((r) => r.tool.name === toolName)
+      // Match action routes: POST /actions/<name>
+      const path = req.url ?? ''
+      const actionName = path.startsWith('/actions/') ? path.slice('/actions/'.length) : path.slice(1)
+      const item = customItems.find((r) => r.name === actionName)
 
-      if (!reg || req.method !== 'POST') {
+      if (!item || req.method !== 'POST') {
         res.writeHead(404)
         res.end()
         return
@@ -59,12 +61,12 @@ async function devAction(opts: { port: string; email?: string }) {
       req.on('data', (c: Buffer) => chunks.push(c))
       req.on('end', async () => {
         const body = Buffer.concat(chunks).toString()
-        console.log(chalk.cyan(`  → tool call: ${toolName}`))
+        console.log(chalk.cyan(`  → action call: ${actionName}`))
 
         try {
           // In dev mode, skip signature verification for ease of local testing
           const payload = JSON.parse(body) as { params: Record<string, unknown> }
-          const parsed = reg.tool.parameters.safeParse(payload.params)
+          const parsed = item.parameters.safeParse(payload.params)
 
           if (!parsed.success) {
             res.writeHead(422, { 'Content-Type': 'application/json' })
@@ -73,24 +75,24 @@ async function devAction(opts: { port: string; email?: string }) {
           }
 
           const env: Record<string, string> = {}
-          for (const key of reg.tool.env) {
+          for (const key of item.env) {
             const val = process.env[key]
             if (val !== undefined) env[key] = val
           }
 
-          const result = await reg.tool.execute(parsed.data, {
-            message: (payload as any).context?.message ?? {},
-            agent: { name: config.agent.name, email: agentEmail },
+          const result = await item.execute(parsed.data, {
+            message: (payload as { context?: { message?: unknown } }).context?.message ?? {},
+            agent: { name: norm.agentName, email: agentEmail },
             env,
-            log: (msg) => console.log(chalk.dim(`     [${toolName}] ${msg}`)),
+            log: (msg: string) => console.log(chalk.dim(`     [${actionName}] ${msg}`)),
           })
 
-          console.log(chalk.green(`  ✓ tool done: ${toolName}`))
+          console.log(chalk.green(`  ✓ action done: ${actionName}`))
           res.writeHead(200, { 'Content-Type': 'application/json' })
           res.end(JSON.stringify({ success: true, result }))
         } catch (err) {
-          const message = err instanceof Error ? err.message : 'Tool error'
-          console.log(chalk.red(`  ✗ tool error: ${toolName}: ${message}`))
+          const message = err instanceof Error ? err.message : 'Action error'
+          console.log(chalk.red(`  ✗ action error: ${actionName}: ${message}`))
           res.writeHead(500, { 'Content-Type': 'application/json' })
           res.end(JSON.stringify({ success: false, error: message }))
         }
@@ -99,8 +101,8 @@ async function devAction(opts: { port: string; email?: string }) {
 
     server.listen(port)
     console.log(chalk.dim(`  Webhook handlers ready:\n`))
-    for (const reg of customTools) {
-      console.log(chalk.dim(`    ${reg.tool.name}  →  http://localhost:${port}/${reg.tool.name}`))
+    for (const item of customItems) {
+      console.log(chalk.dim(`    ${item.name}  →  http://localhost:${port}/actions/${item.name}`))
     }
     console.log()
   }
@@ -119,9 +121,9 @@ async function devAction(opts: { port: string; email?: string }) {
         body: JSON.stringify({
           agentEmail,
           localWebhookPort: port,
-          tools: customTools.map((r) => ({
-            name: r.tool.name,
-            localPath: `/${r.tool.name}`,
+          actions: customItems.map((r) => ({
+            name: r.name,
+            localPath: `/actions/${r.name}`,
           })),
         }),
       })
@@ -129,7 +131,7 @@ async function devAction(opts: { port: string; email?: string }) {
 
       if (res.ok) {
         console.log(chalk.bold('  Agent running') + chalk.dim(' (sandbox mode)'))
-        console.log(chalk.dim(`  Inbox:   ${agentEmail}`))
+        console.log(chalk.dim(`  Inbox:    ${agentEmail}`))
         console.log(chalk.dim(`  Webhooks: http://localhost:${port}`))
       } else {
         console.log(chalk.yellow('  ⚠ Could not connect to Fo sandbox'))
@@ -143,7 +145,7 @@ async function devAction(opts: { port: string; email?: string }) {
   } else {
     console.log(chalk.bold('  Agent running') + chalk.dim(' (offline mode)'))
     console.log(chalk.dim('  Run `fo auth` to connect to the Fo sandbox for end-to-end testing.'))
-    if (customTools.length > 0) {
+    if (customItems.length > 0) {
       console.log(chalk.dim(`  Webhooks: http://localhost:${port}`))
     }
   }

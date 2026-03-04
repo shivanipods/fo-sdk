@@ -2,7 +2,7 @@ import { test, describe } from 'node:test'
 import assert from 'node:assert/strict'
 import { createHmac } from 'node:crypto'
 import { z } from 'zod'
-import { defineTool } from '../src/defineTool.js'
+import { defineAction as defineTool } from '../src/defineAction.js'
 import { defineConfig } from '../src/defineConfig.js'
 import { verifyWebhook, WebhookVerificationError } from '../src/webhook.js'
 import {
@@ -23,7 +23,7 @@ describe('defineTool', () => {
     })
 
     assert.equal(tool.name, 'my_tool')
-    assert.equal(tool._brand, 'FoTool')
+    assert.equal(tool._brand, 'FoAction')
     assert.deepEqual(tool.env, [])
   })
 

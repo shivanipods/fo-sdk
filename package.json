@@ -1,6 +1,6 @@
 {
   "name": "@fo/sdk",
-  "version": "0.1.0",
+  "version": "2.0.0",
   "description": "Build custom agents on Fo's EA intelligence platform",
   "type": "module",
   "main": "./dist/index.js",

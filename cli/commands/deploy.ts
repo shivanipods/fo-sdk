@@ -2,7 +2,7 @@ import { Command } from 'commander'
 import chalk from 'chalk'
 import ora from 'ora'
 import fetch from 'node-fetch'
-import { findConfigFile, loadConfig } from '../utils/config.js'
+import { findConfigFile, loadConfig, normalizeConfig } from '../utils/config.js'
 import { requireAuth, FO_API_BASE } from '../utils/auth.js'
 
 export function makeDeployCommand(): Command {
@@ -15,6 +15,7 @@ export function makeDeployCommand(): Command {
 interface DeployPayload {
   agentName: string
   agentEmail: string
+  repo?: string
   tools: {
     email: boolean
     calendar: boolean
@@ -24,10 +25,13 @@ interface DeployPayload {
       description: string
       parameters: Record<string, unknown>
       env: string[]
+      hitl: string
       webhookUrl: string
       webhookSecret: string
     }>
   }
+  schedules: Array<{ name: string; cron: string; timezone?: string; prompt: string }>
+  triggers: Array<{ name: string; prompt: string }>
   instructions: string
   env: string[]
 }
@@ -53,9 +57,10 @@ async function deployAction(opts: { dryRun: boolean }) {
   }
 
   const spinner = ora('Loading config...').start()
-  let config: Awaited<ReturnType<typeof loadConfig>>
+  let norm: ReturnType<typeof normalizeConfig>
   try {
-    config = await loadConfig(configPath)
+    const config = await loadConfig(configPath)
+    norm = normalizeConfig(config)
     spinner.succeed('Config loaded')
   } catch (err) {
     spinner.fail('Failed to load config')
@@ -63,28 +68,32 @@ async function deployAction(opts: { dryRun: boolean }) {
     process.exit(1)
   }
 
-  // Serialize custom tools (strip execute function, keep schema + webhook info)
+  // Serialize custom actions (strip execute function, keep schema + webhook info)
   const { zodToJsonSchema } = await import('zod-to-json-schema')
-  const customTools = (config.tools?.custom ?? []).map((reg) => ({
-    name: reg.tool.name,
-    description: reg.tool.description,
-    parameters: zodToJsonSchema(reg.tool.parameters, { target: 'jsonSchema7' }),
-    env: [...reg.tool.env],
-    webhookUrl: reg.webhookUrl,
-    webhookSecret: reg.webhookSecret,
+  const customActions = norm.customItems.map((item) => ({
+    name: item.name,
+    description: item.description,
+    parameters: zodToJsonSchema(item.parameters, { target: 'jsonSchema7' }),
+    env: [...item.env],
+    hitl: item.hitl ?? 'auto',
+    webhookUrl: item.webhookUrl,
+    webhookSecret: item.webhookSecret,
   }))
 
   const payload: DeployPayload = {
-    agentName: config.agent.name,
-    agentEmail: config.agent.email,
+    agentName: norm.agentName,
+    agentEmail: norm.agentEmail,
+    repo: norm.repo,
     tools: {
-      email: config.tools?.email ?? true,
-      calendar: config.tools?.calendar ?? true,
-      browser: config.tools?.browser ?? false,
-      custom: customTools,
+      email: norm.capabilities.email,
+      calendar: norm.capabilities.calendar,
+      browser: norm.capabilities.browser,
+      custom: customActions,
     },
-    instructions: config.instructions ?? '',
-    env: config.env ?? [],
+    schedules: norm.schedules,
+    triggers: norm.triggers,
+    instructions: norm.instructions ?? '',
+    env: norm.env,
   }
 
   // Show summary
@@ -92,13 +101,30 @@ async function deployAction(opts: { dryRun: boolean }) {
   console.log(chalk.bold('  Agent:'))
   console.log(chalk.dim(`    Name:   ${payload.agentName}`))
   console.log(chalk.dim(`    Email:  ${payload.agentEmail}@foibleai.com`))
+  if (payload.repo) {
+    console.log(chalk.dim(`    Repo:   ${payload.repo}`))
+  }
   console.log()
-  console.log(chalk.bold('  Tools:'))
+  console.log(chalk.bold('  Capabilities:'))
   console.log(chalk.dim(`    email:    ${payload.tools.email ? 'enabled' : 'disabled'}`))
   console.log(chalk.dim(`    calendar: ${payload.tools.calendar ? 'enabled' : 'disabled'}`))
   console.log(chalk.dim(`    browser:  ${payload.tools.browser ? 'enabled' : 'disabled'}`))
-  if (customTools.length > 0) {
-    console.log(chalk.dim(`    custom:   ${customTools.map((t) => t.name).join(', ')}`))
+  if (customActions.length > 0) {
+    console.log(chalk.dim(`    custom:   ${customActions.map((a) => a.name).join(', ')}`))
+  }
+  if (payload.schedules.length > 0) {
+    console.log()
+    console.log(chalk.bold('  Schedules:'))
+    for (const s of payload.schedules) {
+      console.log(chalk.dim(`    ${s.name}  (${s.cron}${s.timezone ? ` ${s.timezone}` : ''})`))
+    }
+  }
+  if (payload.triggers.length > 0) {
+    console.log()
+    console.log(chalk.bold('  Triggers:'))
+    for (const t of payload.triggers) {
+      console.log(chalk.dim(`    ${t.name}`))
+    }
   }
   console.log()
 
@@ -116,7 +142,7 @@ async function deployAction(opts: { dryRun: boolean }) {
       headers: {
         'Content-Type': 'application/json',
         Authorization: `Bearer ${creds.apiKey}`,
-        'X-Fo-SDK-Version': '0.1.0',
+        'X-Fo-SDK-Version': '2.0.0',
       },
       body: JSON.stringify(payload),
     })
